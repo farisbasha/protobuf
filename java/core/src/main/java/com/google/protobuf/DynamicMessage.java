@@ -530,6 +530,15 @@ public final class DynamicMessage extends AbstractMessage {
       return result;
     }
 
+    /**
+     * Returns the InternalLazyField (not its contained value) if the field is a lazy field,
+     * otherwise returns null.
+     */
+    @SuppressWarnings("ReturnMissingNullable")
+    InternalLazyField getLazyField(FieldDescriptor field) {
+      return fields.getLazyField(field);
+    }
+
     @Override
     public Builder setField(FieldDescriptor field, Object value) {
       // This should be kept as long as LazyField is still around. We will use InternalLazyField

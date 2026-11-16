@@ -281,6 +281,19 @@ final class FieldSet<T extends FieldSet.FieldDescriptorLite<T>> {
   }
 
   /**
+   * Returns the InternalLazyField (not its contained value) if the field is a lazy field, otherwise
+   * returns null.
+   */
+  @SuppressWarnings({"ReturnMissingNullable", "PatternMatchingInstanceof"})
+  InternalLazyField getLazyField(final T descriptor) {
+    Object o = fields.get(descriptor);
+    if (o instanceof InternalLazyField) {
+      return (InternalLazyField) o;
+    }
+    return null;
+  }
+
+  /**
    * Useful for implementing {@link Message.Builder#setField(Descriptors.FieldDescriptor,Object)}.
    */
   // Avoid iterator allocation.

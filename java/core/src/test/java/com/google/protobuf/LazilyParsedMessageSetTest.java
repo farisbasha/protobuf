@@ -18,6 +18,7 @@ import proto2_unittest.UnittestMset.TestMessageSetExtension3;
 import proto2_wireformat_unittest.UnittestMsetWireFormat.TestMessageSet;
 import proto2_wireformat_unittest.UnittestMsetWireFormat.TestMessageSetWireFormatContainer;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
 import org.junit.After;
@@ -52,6 +53,7 @@ public class LazilyParsedMessageSetTest {
       TestMessageSetExtension3.getDescriptor().getExtensions().get(0).getNumber();
   private static final ByteString CORRUPTED_MESSAGE_PAYLOAD =
       ByteString.copyFrom(new byte[] {(byte) 0xff});
+  private static final int RECURSIVE_PAYLOAD_DEPTH = 2000;
 
   @Before
   public void setUp() {
@@ -269,6 +271,12 @@ public class LazilyParsedMessageSetTest {
       ExtensionRegistry registry = ExtensionRegistry.newInstance();
       registry.add(TestMessageSetExtension1.messageSetExtension);
 
+      if (!eager) {
+        // Item 2 is concatenated to the lazy Item 1 without parsing either, so the nested payload
+        // is only parsed, one level at a time, when it is accessed.
+        TestMessageSet unused = TestMessageSet.parseFrom(payload, registry);
+        return;
+      }
       Throwable exception =
           assertThrows(
               InvalidProtocolBufferException.class,
@@ -287,5 +295,58 @@ public class LazilyParsedMessageSetTest {
   @Test
   public void testRecursionLimit_lazyMessageSet() throws Exception {
     testMessageSetRecursionLimit(/* eager= */ false);
+  }
+
+  // Returns a TestMessageSet nested RECURSIVE_PAYLOAD_DEPTH times. Each level has a
+  // TestMessageSetExtension1 item, whose `recursive` field holds the next level, followed by
+  // `duplicate`, which is merged into that (lazily parsed) item.
+  private static ByteString makeRecursiveLazyPayload(ByteString duplicate) throws IOException {
+    ByteString payload = ByteString.EMPTY;
+    for (int i = 0; i < RECURSIVE_PAYLOAD_DEPTH; ++i) {
+      ByteString.Output extension = ByteString.newOutput();
+      CodedOutputStream extensionOutput = CodedOutputStream.newInstance(extension);
+      extensionOutput.writeBytes(16, payload); // TestMessageSetExtension1.recursive
+      extensionOutput.flush();
+      payload = messageSetItem(extension.toByteString()).concat(duplicate);
+    }
+    return payload;
+  }
+
+  private static ByteString messageSetItem(ByteString message) {
+    return RawMessageSet.newBuilder()
+        .addItem(RawMessageSet.Item.newBuilder().setTypeId(TYPE_ID_1).setMessage(message))
+        .build()
+        .toByteString();
+  }
+
+  // Merging a duplicate must not parse the lazy item: that would parse the next level with a new
+  // recursion limit while still parsing this one, and so on (b/586234932). Instead, each level is
+  // parsed when it is accessed.
+  private static void assertParsesLevelByLevel(ByteString payload) throws Exception {
+    ExtensionRegistry registry = ExtensionRegistry.newInstance();
+    registry.add(TestMessageSetExtension1.messageSetExtension);
+    TestMessageSet message = TestMessageSet.parseFrom(payload, registry);
+
+    int depth = 0;
+    while (message.hasExtension(TestMessageSetExtension1.messageSetExtension)) {
+      message = message.getExtension(TestMessageSetExtension1.messageSetExtension).getRecursive();
+      depth++;
+    }
+    assertThat(depth).isEqualTo(RECURSIVE_PAYLOAD_DEPTH);
+  }
+
+  @Test
+  public void testRecursionLimit_duplicateMessageSetItem() throws Exception {
+    assertParsesLevelByLevel(makeRecursiveLazyPayload(messageSetItem(ByteString.EMPTY)));
+  }
+
+  @Test
+  public void testRecursionLimit_duplicateExtensionField() throws Exception {
+    // The extension encoded as a regular field rather than as a MessageSet item.
+    ByteString.Output field = ByteString.newOutput();
+    CodedOutputStream fieldOutput = CodedOutputStream.newInstance(field);
+    fieldOutput.writeBytes(TYPE_ID_1, ByteString.EMPTY);
+    fieldOutput.flush();
+    assertParsesLevelByLevel(makeRecursiveLazyPayload(field.toByteString()));
   }
 }

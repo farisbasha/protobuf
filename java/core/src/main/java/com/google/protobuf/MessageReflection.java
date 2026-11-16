@@ -215,6 +215,12 @@ class MessageReflection {
     public Object getField(Descriptors.FieldDescriptor field);
 
     /**
+     * Returns the value of the given field as an {@link InternalLazyField}, without parsing it, if
+     * the field is stored lazily. Otherwise returns null.
+     */
+    InternalLazyField getLazyField(Descriptors.FieldDescriptor field);
+
+    /**
      * Returns true if the given field is set. This is exactly equivalent to calling the generated
      * "has" accessor method corresponding to the field.
      *
@@ -380,6 +386,15 @@ class MessageReflection {
     @Override
     public Object getField(Descriptors.FieldDescriptor field) {
       return builder.getField(field);
+    }
+
+    @Override
+    public InternalLazyField getLazyField(Descriptors.FieldDescriptor field) {
+      // DynamicMessage is the only builder parsed with this adapter that stores lazy fields.
+      if (builder instanceof DynamicMessage.Builder) {
+        return ((DynamicMessage.Builder) builder).getLazyField(field);
+      }
+      return null;
     }
 
     private Message.Builder getFieldBuilder(Descriptors.FieldDescriptor field) {
@@ -683,6 +698,11 @@ class MessageReflection {
     }
 
     @Override
+    public InternalLazyField getLazyField(Descriptors.FieldDescriptor field) {
+      return extensions.getLazyField(field);
+    }
+
+    @Override
     public boolean hasField(Descriptors.FieldDescriptor field) {
       return extensions.hasField(field);
     }
@@ -902,6 +922,11 @@ class MessageReflection {
     }
 
     @Override
+    public InternalLazyField getLazyField(Descriptors.FieldDescriptor field) {
+      return extensions.getLazyField(field);
+    }
+
+    @Override
     public boolean hasField(Descriptors.FieldDescriptor field) {
       return extensions.hasField(field);
     }
@@ -1075,12 +1100,7 @@ class MessageReflection {
                 && field.isExtension()
                 && !field.getContainingType().isDescriptorProtoType();
         if (hasField(field)) {
-          InternalLazyField lazyField = extensions.getLazyField(field);
-          if (isLazyField && lazyField != null) {
-            Object unused =
-                setField(field, InternalLazyField.mergeFrom(lazyField, input, extensionRegistry));
-            return;
-          }
+          // Existing lazy fields are merged into by mergeFieldFrom().
           Object fieldOrBuilder = extensions.getFieldAllowBuilders(field);
           MessageLite.Builder subBuilder;
           if (fieldOrBuilder instanceof MessageLite.Builder) {
@@ -1262,7 +1282,15 @@ class MessageReflection {
           }
         case MESSAGE:
           {
-            target.mergeMessage(input, extensionRegistry, field, defaultInstance);
+            // Merge into an existing lazy field without parsing it if possible. See
+            // mergeMessageSetExtensionFromBytes() for why.
+            InternalLazyField lazyField = field.isExtension() ? target.getLazyField(field) : null;
+            if (lazyField != null) {
+              target.setField(
+                  field, InternalLazyField.mergeFrom(lazyField, input, extensionRegistry));
+            } else {
+              target.mergeMessage(input, extensionRegistry, field, defaultInstance);
+            }
             return true;
           }
         case ENUM:
@@ -1415,10 +1443,22 @@ class MessageReflection {
       throws IOException {
 
     Descriptors.FieldDescriptor field = extension.descriptor;
-    boolean hasOriginalValue = target.hasField(field);
 
-    // TODO: b/535485217 - Consider letting InternalLazyField to concat the bytes to avoid parsing
-    // if the existing field is a lazy field with lazy bytes.
+    // Merge into an existing lazy field without parsing it if possible. Parsing it here would parse
+    // its bytes with a new CodedInputStream, and thus a fresh recursion limit, while this message
+    // is still being parsed. If those bytes repeat this pattern, the parse recurses without ever
+    // hitting the recursion limit.
+    InternalLazyField lazyField = target.getLazyField(field);
+    if (lazyField != null) {
+      target.setField(
+          field,
+          InternalLazyField.mergeFrom(
+              lazyField,
+              new InternalLazyField(extension.defaultInstance, extensionRegistry, rawBytes)));
+      return;
+    }
+
+    boolean hasOriginalValue = target.hasField(field);
     if (hasOriginalValue || ExtensionRegistryLite.isEagerlyParseMessageSets()) {
       // If the field already exists, we just parse the field.
       int remainingInputRecursionLimit = input.getRemainingRecursionDepth();
@@ -1432,9 +1472,8 @@ class MessageReflection {
       target.setField(field, value);
     } else {
       // Use InternalLazyField to load MessageSet lazily.
-      InternalLazyField lazyField =
-          new InternalLazyField(extension.defaultInstance, extensionRegistry, rawBytes);
-      target.setField(field, lazyField);
+      target.setField(
+          field, new InternalLazyField(extension.defaultInstance, extensionRegistry, rawBytes));
     }
   }
 
